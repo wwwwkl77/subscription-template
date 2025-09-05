@@ -32,148 +32,517 @@
   {{- $proxyNames = printf ", %s" $proxyNames -}}
 {{- end -}}
 
-<!--
-{{ .SiteName }}-{{ .SubscribeName }}
-Traffic: {{ $used }} GiB/{{ $total }} GiB | Expires: {{ $exp }}
--->
-{
-  "log": {"level": "info", "timestamp": true},
-  "experimental": {
-    "cache_file": {"enabled": true, "path": "cache.db", "cache_id": "my_profile", "store_fakeip": false},
-    "clash_api": {"external_controller": "127.0.0.1:9090", "external_ui": "ui", "secret": "", "external_ui_download_url": "https://mirror.ghproxy.com/https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip", "external_ui_download_detour": "direct", "default_mode": "rule"}
-  },
-  "dns": {
-    "servers": [
-      {"tag": "dns_proxy","address": "tls://8.8.8.8","detour": "Proxy"},
-      {"tag": "dns_direct","address": "https://223.5.5.5/dns-query","detour": "direct"}
-    ],
-    "rules": [
-      {"rule_set": "geosite-cn", "server": "dns_direct"},
-      {"clash_mode": "direct", "server": "dns_direct"},
-      {"clash_mode": "global", "server": "dns_proxy"},
-      {"rule_set": "geosite-geolocation-!cn", "server": "dns_proxy"}
-    ],
-    "final": "dns_direct",
-    "strategy": "ipv4_only"
-  },
-  "inbounds": [
-    {"tag": "tun-in", "type": "tun", "address": ["172.18.0.1/30","fdfe:dcba:9876::1/126"], "auto_route": true, "strict_route": true, "stack": "system",
-      "platform": {"http_proxy": {"enabled": true, "server": "127.0.0.1", "server_port": 7890}}},
-    {"tag": "mixed-in", "type": "mixed", "listen": "127.0.0.1", "listen_port": 7890}
-  ],
-  "outbounds": [
-    {"tag": "Proxy", "type": "selector", "outbounds": ["Auto - UrlTest", "direct"{{ $proxyNames }}]},
-    {"tag": "Domestic", "type": "selector", "outbounds": ["direct", "Proxy"{{ $proxyNames }}]},
-    {"tag": "Others", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "AI Suite", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Netflix", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Disney Plus", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "YouTube", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Max", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Spotify", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Apple", "type": "selector", "outbounds": ["direct", "Proxy"{{ $proxyNames }}]},
-    {"tag": "Telegram", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Microsoft", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "Tiktok", "type": "selector", "outbounds": ["Proxy", "direct"{{ $proxyNames }}]},
-    {"tag": "AdBlock", "type": "selector", "outbounds": ["block", "direct", "Proxy"]},
-    {{- if gt (len $supportedProxies) 0 }}
-    {"tag": "Auto - UrlTest", "type": "urltest", "outbounds": [{{ $proxyNames | trimPrefix ", " }}], "url": "http://cp.cloudflare.com/", "interval": "10m", "tolerance": 50}
-    {{- range $i, $proxy := $supportedProxies }},
-{{- $server := $proxy.Server -}}
-{{- if and (contains $proxy.Server ":") (not (hasPrefix "[" $proxy.Server)) -}}
-  {{- $server = printf "[%s]" $proxy.Server -}}
-{{- end -}}
-
-{{- $sni := default "" $proxy.SNI -}}
-{{- if eq $sni "" -}}
-  {{- $sni = default "" $proxy.Host -}}
-{{- end -}}
-{{- if and (eq $sni "") (not (or (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $proxy.Server) (contains $proxy.Server ":"))) -}}
-  {{- $sni = $proxy.Server -}}
-{{- end -}}
-
-{{- $password := $.UserInfo.Password -}}
-{{- if and (eq $proxy.Type "shadowsocks") (ne (default "" $proxy.ServerKey) "") -}}
-  {{- $method := $proxy.Method -}}
-  {{- if or (hasPrefix "2022-blake3-" $method) (eq $method "2022-blake3-aes-128-gcm") (eq $method "2022-blake3-aes-256-gcm") -}}
-    {{- $userKeyLen := ternary 16 32 (hasSuffix "128-gcm" $method) -}}
-    {{- $pwdStr := printf "%s" $password -}}
-    {{- $userKey := ternary $pwdStr (trunc $userKeyLen $pwdStr) (le (len $pwdStr) $userKeyLen) -}}
-    {{- $serverB64 := b64enc $proxy.ServerKey -}}
-    {{- $userB64 := b64enc $userKey -}}
-    {{- $password = printf "%s:%s" $serverB64 $userB64 -}}
+{{- define "AllNodeNames" -}}
+{{- $first := true -}}
+{{- range .Proxies -}}
+  {{- if $first -}}
+    "{{ .Name }}"
+    {{- $first = false -}}
+  {{- else -}}
+    , "{{ .Name }}"
   {{- end -}}
 {{- end -}}
+{{- end -}}
 
-{{- $common := `"tcp_fast_open": true, "udp_over_tcp": false` -}}
+{{- define "AllNodeNamesWithQuotes" -}}
+{{- range $i, $proxy := .Proxies -}}
+  {{- if $i }}, {{ end -}}
+  "{{ $proxy.Name }}"
+{{- end -}}
+{{- end -}}
+
+{{- define "NodeOutbound" -}}
+{{- $proxy := .proxy -}}
+{{- $server := $proxy.Host -}}
+{{- $port := $proxy.Port -}}
+{{- $name := $proxy.Name -}}
+{{- $pwd := $.UserInfo.Password -}}
+{{- $sni := or $proxy.SNI $server }}
+{{- $svc := $proxy.ServiceName }}
+
+{{- $tlsOpts := "" -}}
+{{- if or $sni $proxy.AllowInsecure $proxy.Fingerprint -}}
+  {{- $tlsOpts = "\"tls\": {\"enabled\": true" -}}
+  {{- if $sni -}}
+    {{- $tlsOpts = printf "%s, \"server_name\": \"%s\"" $tlsOpts $sni -}}
+  {{- end -}}
+  {{- if $proxy.AllowInsecure -}}
+    {{- $tlsOpts = printf "%s, \"insecure\": true" $tlsOpts -}}
+  {{- end -}}
+  {{- if $proxy.Fingerprint -}}
+    {{- $tlsOpts = printf "%s, \"utls\": {\"enabled\": true, \"fingerprint\": \"%s\"}" $tlsOpts ($proxy.Fingerprint) -}}
+  {{- end -}}
+  {{- $tlsOpts = printf "%s}" $tlsOpts -}}
+{{- end -}}
+
+{{- $transportOpts := "" -}}
+{{- if or (eq $proxy.Transport "ws") (eq $proxy.Transport "websocket") -}}
+  {{- $wsPath := default "/" $proxy.Path -}}
+  {{- $transportOpts = printf "\"transport\": {\"type\": \"ws\", \"path\": \"%s\"" $wsPath -}}
+  {{- if $proxy.Host -}}
+    {{- $transportOpts = printf "%s, \"headers\": {\"Host\": \"%s\"}" $transportOpts ($proxy.Host) -}}
+  {{- end -}}
+  {{- $transportOpts = printf "%s}" $transportOpts -}}
+{{- else if eq $proxy.Transport "grpc" -}}
+  {{- $grpcService := default "grpc" $svc -}}
+  {{- $transportOpts = printf "\"transport\": {\"type\": \"grpc\", \"service_name\": \"%s\"}" $grpcService -}}
+{{- end -}}
 
 {{- if eq $proxy.Type "shadowsocks" -}}
   {{- $method := default "aes-128-gcm" $proxy.Method -}}
-    { "type": "shadowsocks", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "method": {{ $method | quote }}, "password": {{ $password | quote }}, {{ $common }} }
+  {{- $password := $pwd -}}
+  {{- if $proxy.ServerKey -}}
+    {{- $needBytes := ternary 16 32 (eq $proxy.Method "2022-blake3-aes-128-gcm") -}}
+    {{- $cutLen := min $needBytes (len $pwd) | int -}}
+    {{- $userCut := $pwd | trunc $cutLen -}}
+    {{- $serverB64 := b64enc $proxy.ServerKey -}}
+    {{- $userB64 := b64enc $userCut -}}
+    {{- $password = printf "%s:%s" $serverB64 $userB64 -}}
+  {{- end -}}
+{ "type": "shadowsocks", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "method": "{{ $method }}", "password": "{{ $password }}" }
+
 {{- else if eq $proxy.Type "trojan" -}}
-    { "type": "trojan", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "password": {{ $password | quote }}{{- if or (eq $proxy.Transport "ws") (eq $proxy.Transport "websocket") }}, "transport": {"type": "ws", "path": {{ default "/" $proxy.Path | quote }}{{- if ne (default "" $proxy.Host) "" }}, "headers": {"Host": {{ $proxy.Host | quote }} }{{- end -}}}{{- else if eq $proxy.Transport "grpc" }}, "transport": {"type": "grpc", "service_name": {{ default "grpc" $proxy.ServiceName | quote }}}{{- end }}, {{ $common }}, "tls": {"enabled": true{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }}{{- if $proxy.AllowInsecure }}, "insecure": true{{- end }}{{- if ne (default "" $proxy.Fingerprint) "" }}, "utls": {"enabled": true, "fingerprint": {{ $proxy.Fingerprint | quote }} }{{- end }}} }
+{ "type": "trojan", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "password": "{{ $pwd }}"{{ if $transportOpts }}, {{ $transportOpts }}{{ end }}, {{ $tlsOpts }} }
+
 {{- else if eq $proxy.Type "vless" -}}
-    { "type": "vless", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "uuid": {{ $password | quote }}{{- if ne (default "" $proxy.Flow) "" }}, "flow": {{ $proxy.Flow | quote }}{{- end }}{{- if or (eq $proxy.Transport "ws") (eq $proxy.Transport "websocket") }}, "transport": {"type": "ws", "path": {{ default "/" $proxy.Path | quote }}{{- if ne (default "" $proxy.Host) "" }}, "headers": {"Host": {{ $proxy.Host | quote }} }{{- end -}}}{{- else if eq $proxy.Transport "grpc" }}, "transport": {"type": "grpc", "service_name": {{ default "grpc" $proxy.ServiceName | quote }}}{{- end }}, {{ $common }}{{- if ne (default "" $proxy.RealityPublicKey) "" }}, "reality": { "enabled": true, "public_key": {{ $proxy.RealityPublicKey | quote }}{{- if ne (default "" $proxy.RealityShortId) "" }}, "short_id": {{ $proxy.RealityShortId | quote }}{{- end }}{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }} }{{- else if or (or (eq $proxy.Security "tls") (eq $proxy.Security "reality")) (ne $sni "") $proxy.AllowInsecure (ne (default "" $proxy.Fingerprint) "") }}, "tls": {"enabled": true{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }}{{- if $proxy.AllowInsecure }}, "insecure": true{{- end }}{{- if ne (default "" $proxy.Fingerprint) "" }}, "utls": {"enabled": true, "fingerprint": {{ $proxy.Fingerprint | quote }} }{{- end }}}{{- end }} }
+{{- $realityOpts := "" -}}
+{{- if $proxy.RealityPublicKey -}}
+  {{- $realityOpts = printf "\"reality\": { \"enabled\": true, \"public_key\": \"%s\"" ($proxy.RealityPublicKey) -}}
+  {{- if $proxy.RealityShortId -}}
+    {{- $realityOpts = printf "%s, \"short_id\": \"%s\"" $realityOpts ($proxy.RealityShortId) -}}
+  {{- end -}}
+  {{- if $svc -}}
+    {{- $realityOpts = printf "%s, \"server_name\": \"%s\"" $realityOpts ($svc) -}}
+  {{- end -}}
+  {{- $realityOpts = printf "%s }" $realityOpts -}}
+{{- end -}}
+{{- $flowOpts := "" -}}
+{{- if $proxy.Flow -}}
+  {{- $flowOpts = printf ", \"flow\": \"%s\"" ($proxy.Flow) -}}
+{{- end -}}
+{ "type": "vless", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "uuid": "{{ $pwd }}"{{ $flowOpts }}{{ if $transportOpts }}, {{ $transportOpts }}{{ end }}{{ if $realityOpts }}, {{ $realityOpts }}{{ else if $tlsOpts }}, {{ $tlsOpts }}{{ end }} }
+
 {{- else if eq $proxy.Type "vmess" -}}
-    { "type": "vmess", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "uuid": {{ $password | quote }}, "security": "auto", {{ $common }}{{- if or (eq $proxy.Transport "ws") (eq $proxy.Transport "websocket") }}, "transport": {"type": "ws", "path": {{ default "/" $proxy.Path | quote }}{{- if ne (default "" $proxy.Host) "" }}, "headers": {"Host": {{ $proxy.Host | quote }} }{{- end -}}}{{- else if eq $proxy.Transport "grpc" }}, "transport": {"type": "grpc", "service_name": {{ default "grpc" $proxy.ServiceName | quote }}}{{- end }}{{- if or (or (eq $proxy.Security "tls") (eq $proxy.Security "reality")) (ne $sni "") $proxy.AllowInsecure (ne (default "" $proxy.Fingerprint) "") }}, "tls": {"enabled": true{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }}{{- if $proxy.AllowInsecure }}, "insecure": true{{- end }}{{- if ne (default "" $proxy.Fingerprint) "" }}, "utls": {"enabled": true, "fingerprint": {{ $proxy.Fingerprint | quote }} }{{- end }}}{{- end }} }
+{ "type": "vmess", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "uuid": "{{ $pwd }}", "security": "auto"{{ if $transportOpts }}, {{ $transportOpts }}{{ end }}{{ if $tlsOpts }}, {{ $tlsOpts }}{{ end }} }
+
 {{- else if or (eq $proxy.Type "hysteria2") (eq $proxy.Type "hy2") -}}
-    { "type": "hysteria2", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "password": {{ $password | quote }}{{- if ne (default "" $proxy.ObfsPassword) "" }}, "obfs": { "type": "salamander", "password": {{ $proxy.ObfsPassword | quote }} }{{- end }}{{- if ne (default "" $proxy.HopPorts) "" }}, "ports": {{ $proxy.HopPorts | quote }}{{- end }}{{- if ne (default 0 $proxy.HopInterval) 0 }}, "hop_interval": {{ $proxy.HopInterval }}{{- end }}, {{ $common }}, "tls": {"enabled": true{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }}{{- if $proxy.AllowInsecure }}, "insecure": true{{- end }}{{- if ne (default "" $proxy.Fingerprint) "" }}, "utls": {"enabled": true, "fingerprint": {{ $proxy.Fingerprint | quote }} }{{- end }}} }
+{{- $obfsOpts := "" -}}
+{{- if $proxy.ObfsPassword -}}
+  {{- $obfsOpts = printf "\"obfs\": { \"type\": \"salamander\", \"password\": \"%s\" }" ($proxy.ObfsPassword) -}}
+{{- end -}}
+{{- $hopPortsOpts := "" -}}
+{{- if $proxy.HopPorts -}}
+  {{- $hopPortsOpts = printf ", \"ports\": \"%s\"" ($proxy.HopPorts) -}}
+{{- end -}}
+{{- $hopIntervalOpts := "" -}}
+{{- if $proxy.HopInterval -}}
+  {{- $hopIntervalOpts = printf ", \"hop_interval\": %v" $proxy.HopInterval -}}
+{{- end -}}
+{ "type": "hysteria2", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "password": "{{ $pwd }}"{{ if $obfsOpts }}, {{ $obfsOpts }}{{ end }}{{ $hopPortsOpts }}{{ $hopIntervalOpts }}, {{ $tlsOpts }} }
+
 {{- else if eq $proxy.Type "tuic" -}}
-    { "type": "tuic", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "uuid": {{ default "" $proxy.ServerKey | quote }}, "password": {{ $password | quote }}{{- if $proxy.DisableSNI }}, "disable_sni": true{{- end }}{{- if $proxy.ReduceRtt }}, "reduce_rtt": true{{- end }}{{- if ne (default "" $proxy.UDPRelayMode) "" }}, "udp_relay_mode": {{ $proxy.UDPRelayMode | quote }}{{- end }}{{- if ne (default "" $proxy.CongestionController) "" }}, "congestion_control": {{ $proxy.CongestionController | quote }}{{- end }}, {{ $common }}, "alpn": ["h3"], "tls": {"enabled": true{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }}{{- if $proxy.AllowInsecure }}, "insecure": true{{- end }}{{- if ne (default "" $proxy.Fingerprint) "" }}, "utls": {"enabled": true, "fingerprint": {{ $proxy.Fingerprint | quote }} }{{- end }}} }
+{{- $tuicServerKey := $proxy.ServerKey -}}
+{{- $tuicOpts := "" -}}
+{{- if $proxy.DisableSNI -}}
+  {{- $tuicOpts = printf "%s, \"disable_sni\": %v" $tuicOpts $proxy.DisableSNI -}}
+{{- end -}}
+{{- if $proxy.ReduceRtt -}}
+  {{- $tuicOpts = printf "%s, \"reduce_rtt\": %v" $tuicOpts $proxy.ReduceRtt -}}
+{{- end -}}
+{{- if $proxy.UDPRelayMode -}}
+  {{- $tuicOpts = printf "%s, \"udp_relay_mode\": \"%s\"" $tuicOpts ($proxy.UDPRelayMode) -}}
+{{- end -}}
+{{- if $proxy.CongestionController -}}
+  {{- $tuicOpts = printf "%s, \"congestion_control\": \"%s\"" $tuicOpts ($proxy.CongestionController) -}}
+{{- end -}}
+{ "type": "tuic", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "uuid": "{{ $tuicServerKey }}", "password": "{{ $pwd }}"{{ $tuicOpts }}, "alpn": ["h3"], {{ $tlsOpts }} }
+
 {{- else if eq $proxy.Type "anytls" -}}
-    { "type": "anytls", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "password": {{ $password | quote }}, {{ $common }}, "tls": {"enabled": true{{- if ne $sni "" }}, "server_name": {{ $sni | quote }}{{- end }}{{- if $proxy.AllowInsecure }}, "insecure": true{{- end }}{{- if ne (default "" $proxy.Fingerprint) "" }}, "utls": {"enabled": true, "fingerprint": {{ $proxy.Fingerprint | quote }} }{{- end }}} }
+{ "type": "anytls", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "password": "{{ $pwd }}", {{ $tlsOpts }} }
+
 {{- else if eq $proxy.Type "wireguard" -}}
-    { "type": "wireguard", "tag": {{ $proxy.Name | quote }}, "server": {{ $server | quote }}, "server_port": {{ $proxy.Port }}, "private_key": {{ default "" $proxy.ServerKey | quote }}, "peer_public_key": {{ default "" $proxy.RealityPublicKey | quote }}{{- if ne (default "" $proxy.Path) "" }}, "pre_shared_key": {{ $proxy.Path | quote }}{{- end }}{{- if ne (default "" $proxy.RealityServerAddr) "" }}, "local_address": [{{ $proxy.RealityServerAddr | quote }}]{{- end }}, {{ $common }} }
+{{- $wgPrivateKey := $proxy.ServerKey -}}
+{{- $wgPublicKey := $proxy.RealityPublicKey -}}
+{{- $wgPreSharedOpts := "" -}}
+{{- if $proxy.Path -}}
+  {{- $wgPreSharedOpts = printf ", \"pre_shared_key\": \"%s\"" ($proxy.Path) -}}
+{{- end -}}
+{{- $wgLocalAddressOpts := "" -}}
+{{- if $proxy.RealityServerAddr -}}
+  {{- $wgLocalAddressOpts = printf ", \"local_address\": [\"%s\"]" ($proxy.RealityServerAddr) -}}
+{{- end -}}
+{ "type": "wireguard", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "private_key": "{{ $wgPrivateKey }}", "peer_public_key": "{{ $wgPublicKey }}"{{ $wgPreSharedOpts }}{{ $wgLocalAddressOpts }} }
+
+{{- else if or (eq $proxy.Type "http") (eq $proxy.Type "https") -}}
+{{- $httpsTLSOpts := "" -}}
+{{- if and (eq $proxy.Type "https") $tlsOpts -}}
+  {{- $httpsTLSOpts = printf ", %s" $tlsOpts -}}
+{{- end -}}
+{ "type": "http", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "username": "{{ $pwd }}", "password": "{{ $pwd }}"{{ $httpsTLSOpts }} }
+
+{{- else if or (eq $proxy.Type "socks") (eq $proxy.Type "socks5") -}}
+{ "type": "socks", "tag": "{{ $name }}", "server": "{{ $server }}", "server_port": {{ $port }}, "version": "5", "username": "{{ $pwd }}", "password": "{{ $pwd }}" }
+
 {{- else -}}
-    { "type": "direct", "tag": {{ $proxy.Name | quote }}, {{ $common }} }
-{{- end }}
-    {{- end }},
+{ "type": "direct", "tag": "{{ $name }}" }
+{{- end -}}
+{{- end -}}
+
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_fakeip": true,
+      "store_rdrc": true
+    },
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090",
+      "access_control_allow_origin": [
+        "http://127.0.0.1",
+        "https://yacd.metacubex.one",
+        "https://metacubex.github.io",
+        "https://metacubexd.pages.dev",
+        "https://board.zash.run.place"
+      ]
+    }
+  },
+  "dns": {
+    "independent_cache": true,
+    "servers": [
+      {
+        "tag": "google",
+        "address": "https://8.8.8.8/dns-query",
+        "detour": "节点选择"
+      },
+      {
+        "tag": "ali",
+        "address": "https://223.5.5.5/dns-query",
+        "detour": "直连"
+      },
+      {
+        "tag": "fakeip",
+        "address": "fakeip"
+      }
+    ],
+    "rules": [
+      {
+        "outbound": "any",
+        "server": "ali"
+      },
+      {
+        "clash_mode": "Direct",
+        "server": "ali"
+      },
+      {
+        "clash_mode": "Global",
+        "server": "google"
+      },
+      {
+        "rule_set": "geosite-cn",
+        "server": "ali"
+      },
+      {
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "server": "fakeip"
+      }
+    ],
+    "fakeip": {
+      "enabled": true,
+      "inet4_range": "198.18.0.0/15",
+      "inet6_range": "fc00::/18"
+    }
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "address": [
+        "172.18.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "strict_route": true
+    },
+    {
+      "type": "mixed",
+      "listen": "::",
+      "listen_port": 7890
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "节点选择",
+      "type": "selector",
+      "outbounds": [{{ if gt (len .Proxies) 0 }}{{ template "AllNodeNames" . }}{{ end }}, "直连"]
+    },
+    {
+      "tag": "Github",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "Google",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "Microsoft",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "OpenAI",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "Telegram",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "Twitter",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "Youtube",
+      "type": "selector",
+      "outbounds": [
+        "节点选择",
+        "直连"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {
+      "tag": "国内",
+      "type": "selector",
+      "outbounds": [
+        "直连",
+        "节点选择"
+        {{- if gt (len .Proxies) 0 -}}
+        , {{ template "AllNodeNames" . }}
+        {{- end -}}
+      ]
+    },
+    {{- range $i, $proxy := .Proxies }}
+    {{ if $i }},{{ end }}
+    {{ template "NodeOutbound" (dict "proxy" $proxy "UserInfo" $.UserInfo) }}
     {{- end }}
-    {"type": "direct", "tag": "direct"},
-    {"type": "block", "tag": "block"}
+    {{- if gt (len .Proxies) 0 }},{{ end }}
+    {
+      "tag": "直连",
+      "type": "direct"
+    }
   ],
   "route": {
-    "auto_detect_interface": true, "final": "Proxy",
+    "auto_detect_interface": true,
     "rules": [
-      {"type": "logical", "mode": "or", "rules": [{"port": 53},{"protocol": "dns"}], "action": "hijack-dns"},
-      {"rule_set": "geosite-category-ads-all", "outbound": "AdBlock"},
-      {"clash_mode": "direct", "outbound": "direct"},
-      {"clash_mode": "global", "outbound": "Proxy"},
-      {"domain": ["clash.razord.top","yacd.metacubex.one","yacd.haishan.me","d.metacubex.one"], "outbound": "direct"},
-      {"ip_is_private": true, "outbound": "direct"},
-      {"rule_set": ["geoip-netflix","geosite-netflix"], "outbound": "Netflix"},
-      {"rule_set": "geosite-disney", "outbound": "Disney Plus"},
-      {"rule_set": "geosite-youtube", "outbound": "YouTube"},
-      {"rule_set": "geosite-max", "outbound": "Max"},
-      {"rule_set": "geosite-spotify", "outbound": "Spotify"},
-      {"rule_set": ["geoip-apple","geosite-apple"], "outbound": "Apple"},
-      {"rule_set": ["geoip-telegram","geosite-telegram"], "outbound": "Telegram"},
-      {"rule_set": "geosite-openai", "outbound": "AI Suite"},
-      {"rule_set": "geosite-microsoft", "outbound": "Microsoft"},
-      {"rule_set": "geosite-tiktok", "outbound": "Tiktok"},
-      {"rule_set": "geosite-private", "outbound": "direct"},
-      {"rule_set": ["geoip-cn","geosite-cn"], "outbound": "Domestic"},
-      {"rule_set": "geosite-geolocation-!cn", "outbound": "Others"}
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "直连"
+      },
+      {
+        "rule_set": "anti-ad",
+        "clash_mode": "Rule",
+        "action": "reject"
+      },
+      {
+        "clash_mode": "Direct",
+        "outbound": "直连"
+      },
+      {
+        "clash_mode": "Global",
+        "outbound": "节点选择"
+      },
+      {
+        "rule_set": "geosite-github",
+        "outbound": "Github"
+      },
+      {
+        "rule_set": [
+          "geoip-google",
+          "geosite-google"
+        ],
+        "outbound": "Google"
+      },
+      {
+        "rule_set": "geosite-microsoft",
+        "outbound": "Microsoft"
+      },
+      {
+        "rule_set": "geosite-openai",
+        "outbound": "OpenAI"
+      },
+      {
+        "rule_set": [
+          "geoip-telegram",
+          "geosite-telegram"
+        ],
+        "outbound": "Telegram"
+      },
+      {
+        "rule_set": [
+          "geoip-twitter",
+          "geosite-twitter"
+        ],
+        "outbound": "Twitter"
+      },
+      {
+        "rule_set": "geosite-youtube",
+        "outbound": "Youtube"
+      },
+      {
+        "rule_set": [
+          "geoip-cn",
+          "geosite-cn"
+        ],
+        "outbound": "国内"
+      }
     ],
     "rule_set": [
-      {"tag": "geoip-cn","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs","download_detour": "direct"},
-      {"tag": "geosite-cn","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs","download_detour": "direct"},
-      {"tag": "geosite-private","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/private.srs","download_detour": "direct"},
-      {"tag": "geosite-geolocation-!cn","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/geolocation-!cn.srs","download_detour": "direct"},
-      {"tag": "geosite-category-ads-all","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/category-ads-all.srs","download_detour": "direct"},
-      {"tag": "geoip-netflix","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/netflix.srs","download_detour": "direct"},
-      {"tag": "geosite-netflix","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/netflix.srs","download_detour": "direct"},
-      {"tag": "geosite-disney","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/disney.srs","download_detour": "direct"},
-      {"tag": "geosite-youtube","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/youtube.srs","download_detour": "direct"},
-      {"tag": "geosite-max","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/hbomax.srs","download_detour": "direct"},
-      {"tag": "geosite-spotify","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/spotify.srs","download_detour": "direct"},
-      {"tag": "geoip-apple","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo-lite/geoip/apple.srs","download_detour": "direct"},
-      {"tag": "geosite-apple","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/apple.srs","download_detour": "direct"},
-      {"tag": "geoip-telegram","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/telegram.srs","download_detour": "direct"},
-      {"tag": "geosite-telegram","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/telegram.srs","download_detour": "direct"},
-      {"tag": "geosite-openai","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/openai.srs","download_detour": "direct"},
-      {"tag": "geosite-microsoft","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/microsoft.srs","download_detour": "direct"},
-      {"tag": "geosite-tiktok","type": "remote","format": "binary","url": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/tiktok.srs","download_detour": "direct"}
+      {
+        "tag": "anti-ad",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://anti-ad.net/anti-ad-sing-box.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-github",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-github.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geoip-google",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geoip/geoip-google.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-google",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-google.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-microsoft",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-microsoft.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-openai",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-openai.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geoip-telegram",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geoip/geoip-telegram.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-telegram",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-telegram.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geoip-twitter",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geoip/geoip-twitter.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-twitter",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-twitter.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-youtube",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-youtube.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geosite-cn",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geosite/geosite-cn.srs",
+        "download_detour": "直连"
+      },
+      {
+        "tag": "geoip-cn",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://cdn.jsdmirror.com/gh/lyc8503/sing-box-rules@rule-set-geoip/geoip-cn.srs",
+        "download_detour": "直连"
+      }
     ]
   }
 }
